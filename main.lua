@@ -15,6 +15,9 @@ local state = {
 local checker = {}
 local offset = 0 -- sync the filtering with the source material
 
+local original_volume = 100
+local system_muted = false
+
 local code_seek_just_performed = false
 
 function load_json(path)
@@ -68,17 +71,65 @@ function get_current_timestamp()
     return current_timestamp
 end
 
+
+function is_muted()
+    return (tonumber(mp.get_property('volume')) == 0)
+end
+
+function toggle_mute()
+    local volume = mp.get_property('volume')
+    if tonumber(volume) > 0 then
+        original_volume = tonumber(volume)
+        mp.command('set volume 0')
+    else
+        mp.command('set volume ' .. original_volume)
+    end
+end
+
 function seek(time)
-    mp.command('seek '.. time .. ' absolute exact')
+    mp.command('seek '.. time .. ' absolute')
+    code_seek_just_performed = true
+end
+
+function handle_filter(filter)
+    local type = filter['type']
+    local mute = false
+    if type == 'audio' then
+        print('Filter is audio.')
+        mute = true
+    end
+
+    if mute then
+        if not is_muted() then
+            print('Muting for audio filter.')
+            system_muted = true
+            toggle_mute()
+            
+        end
+        return true
+    end
+
+    print('About to seek for audiovisual filter')
+
+    seek(filter['end'])
+    return false
+    
 end
 
 function every_millisecond()
+
     local current_timestamp = get_current_timestamp()    
 
     if current_timestamp > (state["begin"]) and current_timestamp < (state['end']) then
-        seek(state['end'])
-        code_seek_just_performed = true
-        print('Seeked, now moving to the next...')
+        --seek(state['end'])
+        handle_filter(state)
+        
+    elseif current_timestamp > (state['end']) then
+        print('Reached the end of filter; moving to the next...')
+        if system_muted then
+            toggle_mute()
+            system_muted = false
+        end
         next_state()
     end
     
@@ -89,10 +140,12 @@ function set_filter(filter, index)
     state['begin'] = tonumber(filter['begin']) + offset
     state['end'] = tonumber(filter['end']) + offset
     state['description'] = filter['description']
+    state['type'] = filter['type']
     print('Set filter to index ' .. index .. ' ' .. state['description'])
 end
 
 function reset_find_filters()
+    print('Finding current filter')
     local current_timestamp = get_current_timestamp()
 
     local last_filter = false
@@ -109,14 +162,20 @@ function reset_find_filters()
             e = tonumber(e)
         end
 
-        if current_timestamp >= begin and current_timestamp < e then
+        if current_timestamp >= (begin + offset) and current_timestamp < (e + offset) then
             print('Currently IN a filter.')
-            seek(e)
-            code_seek_just_performed = true
+            --seek(e)
+            set_filter(value, i)
+            local should_end = handle_filter(value)
+            if should_end then
+                return
+            end
+            
         end
 
 
-        if current_timestamp <= begin then
+        if current_timestamp <= (begin + offset) then
+            print('Not in a filter, setting to the next filter ahead of playhead. \n CURRENT TIMESTAMP: ' .. current_timestamp .. '\n Start of next filter: ' .. (begin + offset))
             set_filter(value, i)
             return
         end
@@ -128,12 +187,23 @@ function reset_find_filters()
     print('No more filters after seek.')
 end
 
-function handler()
-    print('File loaded... checking for filters!')
+function reset()
+    print('Running a reset...')
     state['index'] = 1
     if checker.stop ~= nil then
         checker.stop()
     end
+    local volume = mp.get_property('volume')
+    print(volume)
+    original_volume = tonumber(volume)
+end
+
+function handler()
+    print('File loaded... checking for filters!')
+    
+    
+    reset()
+
     local file_path = mp.get_property('path', nil)
     local filters = get_filters_json(file_path)
 
@@ -148,7 +218,9 @@ end
 
 function done()
     print('done')
-    checker.stop()
+    if checker.kill ~= nil then
+        checker:kill()
+    end
 end
 
 function seek_event()
@@ -161,11 +233,10 @@ function seek_event()
 
     reset_find_filters()
 
-
 end
 mp.register_event('file-loaded', handler)
 mp.register_event('end-file', done)
 
-mp.register_event('seek', seek_event)
+mp.register_event('playback-restart', seek_event)
 
 print('test')
